@@ -57,12 +57,10 @@ def carregar_e_processar_dados():
     for nome_arquivo in arquivos_csv:
         try:
             df = pd.read_csv(nome_arquivo, sep=";", encoding='latin1')
-            st.success(f"Arquivo '{nome_arquivo}' carregado com sucesso!")
             break
         except FileNotFoundError:
             try:
                 df = pd.read_csv(nome_arquivo, sep=";", encoding='utf-8')
-                st.success(f"Arquivo '{nome_arquivo}' carregado com sucesso!")
                 break
             except Exception:
                 continue
