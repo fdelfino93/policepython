@@ -340,4 +340,4 @@ else:
         
     else:
         st.error("ERRO: O mapa não pode ser exibido. O arquivo 'curitiba_bairros.geojson' não foi encontrado na mesma pasta do script.")
-        st.info("⬅️ **Selecione um bairro na barra lateral (Sidebar) para visualizar a lista completa de ocorrências.**")
+        st.info("⬅️ **Selecione um bairro na barra lateral para visualizar a lista completa de ocorrências.**")
