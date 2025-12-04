@@ -3,7 +3,8 @@ import pandas as pd
 import unicodedata
 import geopandas as gpd
 import folium
-from streamlit_folium import st_folium
+from streamlit_folium import folium_static
+import json
 
 st.set_page_config(page_title="Consulta de Crimes por Bairro", layout="wide")
 
@@ -12,12 +13,13 @@ st.set_page_config(page_title="Consulta de Crimes por Bairro", layout="wide")
 # =================================================
 
 CATEGORIAS_SEGURANCA = [
-    'Alta segurança', 'Segurança moderada', 'Segurança baixa', 
-    'Segurança muito baixa', 'Segurança crítica'
+    'Alta segurança', 'Segurança moderada', 'Segurança baixa', 'Segurança crítica'
 ]
 CORES_SEGURANCA = {
-    'Seguro': '#2ecc71', 'Segurança moderada': '#f1c40f', 'Segurança baixa': '#e67e22', 
-    'Segurança muito baixa': '#e74c3c', 'Segurança crítica': '#c0392b'
+    'Alta segurança': '#2ecc71',        # Verde (🟢)
+    'Segurança moderada': '#f1c40f',    # Amarelo (🟡)
+    'Segurança baixa': '#e67e22',       # Laranja (🟠)
+    'Segurança crítica': '#e74c3c'      # Vermelho (🔴)
 }
 CORES_TODAS = CORES_SEGURANCA.copy()
 CORES_TODAS['Sem Ocorrências'] = '#3186cc'
@@ -41,8 +43,18 @@ def carregar_e_processar_dados():
     gdf = None
     col_geo = None
     try:
-        gdf = gpd.read_file("curitiba_bairros.geojson")
-        gdf = gdf.to_crs(epsg=4326)
+        # Tentar carregar arquivo corrigido primeiro, senao o original
+        try:
+            gdf = gpd.read_file("curitiba_bairros_corrigido.geojson")
+        except:
+            gdf = gpd.read_file("curitiba_bairros.geojson")
+            # Corrigir CRS se necessario (arquivo original tem CRS errado)
+            if gdf.total_bounds[0] > 1000:  # Coordenadas em metros, nao graus
+                gdf = gdf.set_crs(epsg=31982, allow_override=True)
+                gdf = gdf.to_crs(epsg=4326)
+            else:
+                gdf = gdf.to_crs(epsg=4326)
+
         possible_cols = ["NOME", "name", "BAIRRO", "bairro", "NOME_BAIRRO"]
         col_geo = next((c for c in possible_cols if c in gdf.columns), None)
         if not col_geo:
@@ -53,14 +65,14 @@ def carregar_e_processar_dados():
 
     arquivos_csv = ["Dados_crimes.csv", "dados_crimes.csv", "Dados_crimes.csv.csv"]
     df = None
-    
+
     for nome_arquivo in arquivos_csv:
         try:
-            df = pd.read_csv(nome_arquivo, sep=";", encoding='latin1')
+            df = pd.read_csv(nome_arquivo, sep=";", encoding='utf-8-sig')
             break
-        except FileNotFoundError:
+        except (FileNotFoundError, UnicodeDecodeError):
             try:
-                df = pd.read_csv(nome_arquivo, sep=";", encoding='utf-8')
+                df = pd.read_csv(nome_arquivo, sep=";", encoding='latin1')
                 break
             except Exception:
                 continue
@@ -105,11 +117,11 @@ def carregar_e_processar_dados():
     if not df_high_score.empty:
         try:
             stats.loc[high_score_mask, 'CATEGORIA'] = pd.qcut(
-                df_high_score['SCORE'], 5, labels=CATEGORIAS_SEGURANCA, duplicates='drop'
+                df_high_score['SCORE'], 4, labels=CATEGORIAS_SEGURANCA, duplicates='drop'
             )
         except Exception:
             stats.loc[high_score_mask, 'CATEGORIA'] = 'Análise Indisponível'
-    
+
     stats['COR'] = stats['CATEGORIA'].map(CORES_TODAS)
     
     return gdf, col_geo, col_csv_bairro, df_curitiba, stats
@@ -159,8 +171,7 @@ with st.sidebar:
     st.markdown("🟢 **Alta segurança**")
     st.markdown("🟡 **Segurança moderada**")
     st.markdown("🟠 **Segurança baixa**")
-    st.markdown("🔴 **Segurança muito baixa**")
-    st.markdown("⚫ **Segurança crítica**")
+    st.markdown("🔴 **Segurança crítica**")
 
 
 # =================================================
@@ -184,19 +195,54 @@ if bairro_foco and bairro_foco != "Selecione...":
     c2.metric("Score de Risco (Acumulado)", f"{val_score:.0f}")
     
     st.markdown("---")
-    
+
     df_bairro = df_crimes_raw[df_crimes_raw['chave_bairro'] == bairro_key].drop(columns=['chave_bairro', 'PESO'], errors='ignore')
-    
+
     if not df_bairro.empty:
-        st.subheader(f"Lista de Ocorrências ({len(df_bairro)} registros)")
-        
+        # RESUMO DE CRIMES POR CATEGORIA
+        st.subheader("Resumo de Ocorrências")
+
+        # Categorizar crimes
+        def categorizar_crime(crime):
+            c = str(crime).upper()
+            if any(x in c for x in ['HOMICIDIO', 'HOMICÍDIO', 'MORTE', 'CVLI', 'LATROCINIO', 'LATROCÍNIO']):
+                return 'Homicídios e Mortes'
+            if any(x in c for x in ['ROUBO']):
+                return 'Roubos'
+            if any(x in c for x in ['FURTO']):
+                return 'Furtos'
+            if any(x in c for x in ['ESTUPRO', 'FEMINICIDIO', 'FEMINICÍDIO']):
+                return 'Crimes Sexuais e Feminicídio'
+            if any(x in c for x in ['AGRESSAO', 'AGRESSÃO', 'LESAO', 'LESÃO']):
+                return 'Agressões'
+            if any(x in c for x in ['AMEACA', 'AMEAÇA']):
+                return 'Ameaças'
+            return 'Outros'
+
+        col_crime = next((c for c in df_bairro.columns if any(x in c.upper() for x in ['NATUREZA', 'CRIME', 'DELITO'])), None)
+
+        if col_crime:
+            df_bairro['CATEGORIA_CRIME'] = df_bairro[col_crime].apply(categorizar_crime)
+            resumo = df_bairro['CATEGORIA_CRIME'].value_counts().sort_values(ascending=False)
+
+            # Exibir resumo em colunas
+            cols = st.columns(3)
+            for idx, (categoria, quantidade) in enumerate(resumo.items()):
+                with cols[idx % 3]:
+                    st.metric(label=categoria, value=int(quantidade))
+
+        st.markdown("---")
+
+        # LISTA DETALHADA DE OCORRÊNCIAS
+        st.subheader(f"Lista Detalhada de Ocorrências ({len(df_bairro)} registros)")
+
         cols_to_show = [
-            'NATUREZA', 'MUNICÍPIO', col_name_csv, 'ANO', 'MÊS', 'DIA', 
+            'NATUREZA', 'MUNICÍPIO', col_name_csv, 'ANO', 'MÊS', 'DIA',
             'DIA DA SEMANA', 'HORA', 'IDADE', 'SEXO', 'RAÇA/COR'
         ]
         df_display = df_bairro[[c for c in cols_to_show if c in df_bairro.columns]]
 
-        st.dataframe(df_display, use_container_width=True)
+        st.dataframe(df_display, width='stretch')
     else:
         st.info("Nenhuma ocorrência detalhada de crime encontrada neste bairro.")
 
@@ -208,43 +254,50 @@ else:
     st.markdown("---")
     
     if gdf_map is not None:
-        st.subheader("Clique em um bairro para ver os detalhes:")
-        
-        gdf_map_final = gdf_map.merge(df_stats[['chave_bairro', 'CATEGORIA', 'COR']], 
+        st.subheader("Selecione um bairro na barra lateral ou passe o mouse no mapa:")
+
+        # Fazer merge dos dados
+        gdf_map_final = gdf_map.merge(df_stats[['chave_bairro', 'CATEGORIA', 'COR', 'SCORE']],
                                       on='chave_bairro', how='left')
-        
-        gdf_map_final['COR'] = gdf_map_final['COR'].fillna('#808080')
-        
+
+        # Preencher valores NaN
+        gdf_map_final['COR'] = gdf_map_final['COR'].fillna('#d3d3d3')
+        gdf_map_final['CATEGORIA'] = gdf_map_final['CATEGORIA'].fillna('Sem Ocorrências')
+        gdf_map_final['SCORE'] = gdf_map_final['SCORE'].fillna(0)
+
+        # Criar mapa
         centro = [-25.4284, -49.2733]
-        zoom = 11
+        mapa = folium.Map(location=centro, zoom_start=12, tiles="cartodbpositron")
 
-        mapa = folium.Map(location=centro, zoom_start=zoom, tiles="CartoDB positron")
+        # Converter GeoDataFrame para GeoJSON com as propriedades corretas
+        geojson_str = gdf_map_final.to_json()
+        geojson_data = json.loads(geojson_str)
 
+        # Adicionar camada GeoJSON com estilo baseado na propriedade COR
         folium.GeoJson(
-            gdf_map_final,
-            name="Segurança",
-            style_function=lambda x: {
-                'fillColor': x['properties'].get('COR', '#808080'), 
-                'color': 'black',
-                'weight': 1,
+            geojson_data,
+            name="Bairros",
+            style_function=lambda feature: {
+                'fillColor': feature['properties']['COR'],
+                'color': '#333333',
+                'weight': 1.5,
                 'fillOpacity': 0.7
             },
+            highlight_function=lambda feature: {
+                'fillColor': feature['properties']['COR'],
+                'color': '#000000',
+                'weight': 3,
+                'fillOpacity': 0.9
+            },
             tooltip=folium.GeoJsonTooltip(
-                fields=[col_name_geo, 'CATEGORIA'], 
-                aliases=['Bairro:', 'Nível:'],
+                fields=[col_name_geo, 'CATEGORIA', 'SCORE'],
+                aliases=['Bairro:', 'Classificação:', 'Score:'],
+                style="font-size: 14px;"
             )
         ).add_to(mapa)
 
-        result = st_folium(mapa, width=1200, height=600)
-        
-        if result and "last_object_clicked" in result:
-            item = result["last_object_clicked"]
-            
-            if item and "properties" in item:
-                if col_name_geo in item["properties"]:
-                    bairro_clicado = item["properties"][col_name_geo]
-                    st.query_params["regiao"] = bairro_clicado
-                    st.rerun()
+        # Exibir mapa usando folium_static
+        folium_static(mapa, width=1100, height=600)
         
     else:
         st.error("ERRO: O mapa não pode ser exibido. O arquivo 'curitiba_bairros.geojson' não foi encontrado na mesma pasta do script.")
