@@ -3,10 +3,19 @@ import pandas as pd
 import unicodedata
 import geopandas as gpd
 import folium
-from streamlit_folium import folium_static
+from streamlit_folium import st_folium
 import json
 
 st.set_page_config(page_title="Consulta de Crimes por Bairro", layout="wide")
+
+# Esconder navegação lateral (links Home/bairros)
+st.markdown("""
+<style>
+    [data-testid="stSidebarNav"] {
+        display: none;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # =================================================
 # FUNÇÕES DE LIMPEZA E CATEGORIZAÇÃO
@@ -106,6 +115,17 @@ def carregar_e_processar_dados():
     df_curitiba['PESO'] = df_curitiba[col_csv_crime].apply(definir_peso)
     stats = df_curitiba.groupby('chave_bairro')['PESO'].sum().reset_index()
     stats.columns = ['chave_bairro', 'SCORE']
+
+    # Calcular contagem de homicídios/mortes por bairro
+    def is_homicidio(crime):
+        c = str(crime).upper()
+        return any(x in c for x in ['HOMICIDIO', 'HOMICÍDIO', 'LATROCINIO', 'LATROCÍNIO', 'MORTE', 'CVLI'])
+
+    df_curitiba['IS_HOMICIDIO'] = df_curitiba[col_csv_crime].apply(is_homicidio)
+    homicidios = df_curitiba[df_curitiba['IS_HOMICIDIO']].groupby('chave_bairro').size().reset_index()
+    homicidios.columns = ['chave_bairro', 'HOMICIDIOS']
+    stats = stats.merge(homicidios, on='chave_bairro', how='left')
+    stats['HOMICIDIOS'] = stats['HOMICIDIOS'].fillna(0).astype(int)
 
     # Categorização de Segurança
     stats['CATEGORIA'] = 'Sem Classificação'
@@ -257,13 +277,14 @@ else:
         st.subheader("Selecione um bairro na barra lateral ou passe o mouse no mapa:")
 
         # Fazer merge dos dados
-        gdf_map_final = gdf_map.merge(df_stats[['chave_bairro', 'CATEGORIA', 'COR', 'SCORE']],
+        gdf_map_final = gdf_map.merge(df_stats[['chave_bairro', 'CATEGORIA', 'COR', 'SCORE', 'HOMICIDIOS']],
                                       on='chave_bairro', how='left')
 
         # Preencher valores NaN
         gdf_map_final['COR'] = gdf_map_final['COR'].fillna('#d3d3d3')
         gdf_map_final['CATEGORIA'] = gdf_map_final['CATEGORIA'].fillna('Sem Ocorrências')
         gdf_map_final['SCORE'] = gdf_map_final['SCORE'].fillna(0)
+        gdf_map_final['HOMICIDIOS'] = gdf_map_final['HOMICIDIOS'].fillna(0).astype(int)
 
         # Criar mapa
         centro = [-25.4284, -49.2733]
@@ -274,7 +295,7 @@ else:
         geojson_data = json.loads(geojson_str)
 
         # Adicionar camada GeoJSON com estilo baseado na propriedade COR
-        folium.GeoJson(
+        geojson_layer = folium.GeoJson(
             geojson_data,
             name="Bairros",
             style_function=lambda feature: {
@@ -290,14 +311,32 @@ else:
                 'fillOpacity': 0.9
             },
             tooltip=folium.GeoJsonTooltip(
-                fields=[col_name_geo, 'CATEGORIA', 'SCORE'],
-                aliases=['Bairro:', 'Classificação:', 'Score:'],
+                fields=[col_name_geo, 'CATEGORIA', 'SCORE', 'HOMICIDIOS'],
+                aliases=['Bairro:', 'Classificação:', 'Score:', 'Homicídios/Mortes:'],
                 style="font-size: 14px;"
             )
-        ).add_to(mapa)
+        )
+        geojson_layer.add_to(mapa)
 
-        # Exibir mapa usando folium_static
-        folium_static(mapa, width=1100, height=600)
+        # Exibir mapa usando st_folium com suporte a clique
+        map_data = st_folium(mapa, width=1100, height=600)
+
+        # Verificar se o usuário clicou em um bairro
+        if map_data and map_data.get("last_clicked"):
+            clicked = map_data["last_clicked"]
+            lat = clicked.get("lat")
+            lng = clicked.get("lng")
+            if lat and lng:
+                from shapely.geometry import Point
+                ponto = Point(lng, lat)
+                # Encontrar bairro pelo ponto clicado
+                for idx, row in gdf_map_final.iterrows():
+                    if row.geometry.contains(ponto):
+                        bairro_clicado = row[col_name_geo]
+                        if bairro_clicado and bairro_clicado in lista_bairros:
+                            st.query_params["regiao"] = bairro_clicado
+                            st.rerun()
+                        break
         
     else:
         st.error("ERRO: O mapa não pode ser exibido. O arquivo 'curitiba_bairros.geojson' não foi encontrado na mesma pasta do script.")
